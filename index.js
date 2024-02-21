@@ -5,7 +5,7 @@ const axios = require('axios');
 const multer = require('multer');
 const { MongoClient, ObjectId } = require('mongodb');
 const { GooglePaLMEmbeddings } = require("@langchain/community/embeddings/googlepalm");
-
+const { RecursiveCharacterTextSplitter } = require('langchain/text_splitter');
 const app = express();
 const port = 8001;
 
@@ -67,13 +67,41 @@ async function generateTextEmbeddings(text) {
             modelName: "models/embedding-gecko-001",
         });
 
-        const embeddings = await model.embedQuery(text);
-        return embeddings;
+        // Chunk the text
+        const textSplitter = new RecursiveCharacterTextSplitter({
+            chunkSize: 750,
+        });
+        const chunks = await textSplitter.createDocuments([text]);
+        let embeddingsArrays = [];
+        // Generate embeddings for each chunk
+        for (let chunk of chunks) {
+            const embeddings = await model.embedQuery(chunk.pageContent);
+            embeddingsArrays = embeddings.map((embedding) => embedding.embedding);
+            console.log(embeddings)
+            console.log('_______________________________________________________________________')
+            const batchSize = 750;
+            let batch = [];
+            for (let idx = 0; idx < chunks.length; idx++) {
+            const chunk = chunks[idx];
+            const vector = {
+                id: `${idx}`,
+                values: embeddingsArrays[idx],
+                metadata: {
+                ...chunk.metadata,
+                pageContent: chunk.pageContent,
+                },
+            };
+            batch.push(vector);
+        }   
+    } 
+    console.log(embeddingsArrays);
+    return embeddingsArrays;
     } catch (error) {
         console.error('Error generating text embeddings:', error);
         throw new Error('Error generating text embeddings.');
     }
 }
+
 
 // Function to search in Pinecone based on embeddings and retrieve metadata
 async function searchInPinecone(embeddings) {
