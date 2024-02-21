@@ -224,12 +224,8 @@ app.get('/api/files', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
-        // Fetch only the title attribute, excluding _id
-        const documents = await collection.find({}, { projection: { title: 1, _id: 0 } }).toArray();
-        
-        // You no longer need to process each document to extract text,
-        // as you're directly fetching the title.
-        // The variable 'documents' already contains what you need.
+        // Fetch both the title and text attributes, excluding _id
+        const documents = await collection.find({}, { projection: { title: 1, text: 1, _id: 0 } }).toArray();
 
         res.json(documents);
     } catch (error) {
@@ -239,6 +235,7 @@ app.get('/api/files', async (req, res) => {
         await client.close();
     }
 });
+
 
 
 
