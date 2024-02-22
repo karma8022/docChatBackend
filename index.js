@@ -6,6 +6,7 @@ const multer = require('multer');
 const { MongoClient, ObjectId } = require('mongodb');
 const { GooglePaLMEmbeddings } = require("@langchain/community/embeddings/googlepalm");
 const { RecursiveCharacterTextSplitter } = require('langchain/text_splitter');
+
 const app = express();
 const port = 8001;
 
@@ -13,19 +14,7 @@ const port = 8001;
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
-
 const upload = multer({ storage: multer.memoryStorage() });
-
-async function extractText(buffer) {
-    try {
-        const textContent = buffer.toString('utf8');
-        console.log("File read successfully from buffer");
-        return textContent;
-    } catch (error) {
-        console.error('Error reading from buffer:', error);
-        throw new Error('Error processing buffer.');
-    }
-}
 
 async function extractText(buffer) {
     try {
@@ -44,7 +33,6 @@ const client = new MongoClient(mongoUri);
 const dbName = 'Cluster0'; // Your MongoDB database name
 const collectionName = 'documents'; // Your MongoDB collection name
 
-// Configure Axios for external APIs
 const pineconeAxios = axios.create({
     baseURL: "https://palm-bff4931.svc.gcp-starter.pinecone.io", // Replace with your Pinecone base URL
     headers: {
@@ -59,51 +47,6 @@ const huggingFaceAxios = axios.create({
     }
 });
 
-// Function to generate text embeddings using Google PaLM API
-async function generateTextEmbeddings(text) {
-    try {
-        const model = new GooglePaLMEmbeddings({
-            apiKey: "AIzaSyBysL_SjXQkJ8lI1WPTz4VwyH6fxHijGUE", // Replace with your actual API key
-            modelName: "models/embedding-gecko-001",
-        });
-
-        // Chunk the text
-        const textSplitter = new RecursiveCharacterTextSplitter({
-            chunkSize: 750,
-        });
-        const chunks = await textSplitter.createDocuments([text]);
-        let embeddingsArrays = [];
-        // Generate embeddings for each chunk
-        for (let chunk of chunks) {
-            const embeddings = await model.embedQuery(chunk.pageContent);
-            embeddingsArrays = embeddings.map((embedding) => embedding.embedding);
-            console.log(embeddings)
-            console.log('_______________________________________________________________________')
-            const batchSize = 750;
-            let batch = [];
-            for (let idx = 0; idx < chunks.length; idx++) {
-            const chunk = chunks[idx];
-            const vector = {
-                id: `${idx}`,
-                values: embeddingsArrays[idx],
-                metadata: {
-                ...chunk.metadata,
-                pageContent: chunk.pageContent,
-                },
-            };
-            batch.push(vector);
-        }   
-    } 
-    console.log(embeddingsArrays);
-    return embeddingsArrays;
-    } catch (error) {
-        console.error('Error generating text embeddings:', error);
-        throw new Error('Error generating text embeddings.');
-    }
-}
-
-
-// Function to search in Pinecone based on embeddings and retrieve metadata
 async function searchInPinecone(embeddings) {
     try {
         const response = await pineconeAxios.post('/query', {
@@ -119,20 +62,21 @@ async function searchInPinecone(embeddings) {
     }
 }
 
-// Function to fetch document texts from MongoDB using their IDs
 async function getTextsFromMongoDB(documentIds) {
     let texts = [];
     try {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
-        
-        for (let documentId of documentIds) {
+        let cleanedDocumentIds = documentIds.map(id => id.substring(0, id.lastIndexOf('_')));
+        console.log(cleanedDocumentIds)
+        for (let documentId of cleanedDocumentIds) {
             const document = await collection.findOne({ _id: new ObjectId(documentId) });
             if (document !== null) {
                 texts.push(document.text); // Assuming the text is stored under the "text" field
+                console.log('done');
             } else {
-                console.log(`No document found for ID: ${documentId}`);
+                console.log('No document found for ID:', `${documentId}`);
                 // Optionally handle the case where the document is not found, e.g., by pushing a placeholder or skipping
             }
         }
@@ -145,7 +89,7 @@ async function getTextsFromMongoDB(documentIds) {
     return texts;
 }
 
-// Function to generate a contextual answer using Hugging Face
+
 async function generateContextualAnswer(context, question) {
     try {
         const payload = {
@@ -173,7 +117,7 @@ async function saveTextToMongoDB(text, title) {
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
         const result = await collection.insertOne({ text, title });
-        console.log(`File saved to MongoDB with _id: ${result.insertedId}`);
+        console.log('File saved to MongoDB with _id:', `${result.insertedId}`);
         return result.insertedId;
     } catch (error) {
         console.error("Error saving file to MongoDB:", error);
@@ -183,9 +127,9 @@ async function saveTextToMongoDB(text, title) {
     }
 }
 
-// Main function to perform a semantic search and display results
 async function performSemanticSearch(query) {
-    const embeddings = await generateTextEmbeddings(query);
+    console.log(query)
+    const embeddings = await generateTextEmbeddingsQuery(query);
     const searchResults = await searchInPinecone(embeddings);
 
     const documentIds = searchResults.matches.map(match => match.id);
@@ -200,7 +144,6 @@ async function performSemanticSearch(query) {
     }
 }
 
-// POST endpoint to perform semantic search
 app.post('/performSemanticSearch', async (req, res) => {
     const { query } = req.body;
     try {
@@ -212,40 +155,6 @@ app.post('/performSemanticSearch', async (req, res) => {
     }
 });
 
-app.post('/upload', upload.single('file'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).send('No file uploaded.');
-    }
-
-    try {
-        // Now using the buffer directly from the uploaded file
-        const buffer = req.file.buffer;
-        const text = await extractText(buffer);
-        const title= req.file.originalname;
-        const embeddings = await generateTextEmbeddings(text);
-        const mongoDocumentId = await saveTextToMongoDB(text,title);
-        const vectorId = mongoDocumentId.toString();
-
-        // Upload the embeddings to Pinecone with the MongoDB document ID as a reference
-        const pineconeResponse = await pineconeAxios.post('/vectors/upsert', {
-            namespace: 'your-namespace', // Replace with your actual namespace
-            vectors: [{
-                id: vectorId,
-                values: embeddings,
-            }],
-        });
-
-        res.json({
-            message: 'Document and embeddings successfully uploaded.',
-            mongoDocumentId: mongoDocumentId,
-            pineconeResponse: pineconeResponse.data
-        });
-        console.log('Upload to pinecone complete.');
-    } catch (error) {
-        console.error('Error processing upload:', error);
-        res.status(500).send('Error processing upload.');
-    }
-});
 
 app.get('/api/files', async (req, res) => {
     try {
@@ -264,9 +173,92 @@ app.get('/api/files', async (req, res) => {
     }
 });
 
+async function generateTextEmbeddings(text) {
+    try {
+        const model = new GooglePaLMEmbeddings({
+            apiKey: "AIzaSyBysL_SjXQkJ8lI1WPTz4VwyH6fxHijGUE",
+            modelName: "models/embedding-gecko-001",
+        });
+
+        const textSplitter = new RecursiveCharacterTextSplitter({
+            chunkSize: 1000,
+            chunkOverlap: 50
+        });
+        const chunks = await textSplitter.createDocuments([text]);
+        console.log(chunks)
+        
+        // Generate embeddings for each chunk
+        const embeddingsPromises = chunks.map(chunk => model.embedQuery(chunk.pageContent));
+        const embeddingsArrays = await Promise.all(embeddingsPromises);
+
+        // Return the array of embeddings
+        return embeddingsArrays;
+    } catch (error) {
+        console.error('Error generating text embeddings:', error);
+        throw new Error('Error generating text embeddings.');
+    }
+}
+
+
+async function generateTextEmbeddingsQuery(text) {
+    try {
+        const model = new GooglePaLMEmbeddings({
+            apiKey: "AIzaSyBysL_SjXQkJ8lI1WPTz4VwyH6fxHijGUE", // Replace with your actual API key
+            modelName: "models/embedding-gecko-001",
+        });
+
+        const embeddings = await model.embedQuery(text);
+        console.log(embeddings)
+        return embeddings;
+    } catch (error) {
+        console.error('Error generating text embeddings:', error);
+        throw new Error('Error generating text embeddings.');
+    }
+}
+
+
+
+
+
+app.post('/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).send('No file uploaded.');
+    }
+
+    try {
+        const buffer = req.file.buffer;
+        const text = await extractText(buffer);
+        const title = req.file.originalname;
+        const embeddingsArrays = await generateTextEmbeddings(text);
+        const mongoDocumentId = await saveTextToMongoDB(text, title);
+
+        // Iterate over each embedding and upload separately
+        for (const [index, embedding] of embeddingsArrays.entries()) {
+            const vectorId = mongoDocumentId.toString(); // Unique ID for each embedding
+
+            await pineconeAxios.post('/vectors/upsert', {
+                namespace: 'your-namespace', // Ensure this matches your Pinecone config
+                vectors: [{
+                    id: vectorId,
+                    values: embedding,
+                }],
+            });
+        }
+        console.log('Upload to pinecone complete.');
+        res.json({
+            message: 'Document and embeddings successfully uploaded.',
+            mongoDocumentId: mongoDocumentId,
+        });
+    }  catch (error) {
+        console.error('Error processing upload:', error);
+        res.status(500).send('Error processing upload.');
+    }
+});
+
+
 
 
 
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+    console.log('Server running on port', `${port}`);
 });
